@@ -13,6 +13,40 @@ from prompts import CON_PROMPT, FINAL_PROMPT, FOR_PROMPT, SYS_PROMPT
 
 load_dotenv()
 
+
+def _is_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def configure_langsmith_tracing() -> bool:
+    """
+    Enable LangSmith tracing when LANGSMITH_TRACING is truthy.
+    """
+    tracing_enabled = _is_truthy(os.getenv("LANGSMITH_TRACING"))
+    if not tracing_enabled:
+        return False
+
+    api_key = os.getenv("LANGSMITH_API_KEY")
+    if not api_key:
+        print(
+            "LangSmith tracing requested but LANGSMITH_API_KEY is missing; "
+            "tracing will remain disabled."
+        )
+        return False
+
+    project_name = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "consensusgraph"
+    # Keep both names for compatibility across LangChain versions.
+    os.environ.setdefault("LANGSMITH_TRACING", "true")
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    os.environ.setdefault("LANGSMITH_PROJECT", project_name)
+    os.environ.setdefault("LANGCHAIN_PROJECT", project_name)
+    # Avoid blocking model responses while trace data uploads.
+    os.environ.setdefault("LANGCHAIN_CALLBACKS_BACKGROUND", "true")
+    return True
+
+
+LANGSMITH_TRACING_ENABLED = configure_langsmith_tracing()
+
 memory = InMemorySaver()
 model_name = "moonshotai/kimi-k2.6"
 model = ChatOpenRouter(model=model_name, temperature=0.1, max_retries=1)
@@ -129,10 +163,22 @@ if __name__ == "__main__":
     task = input("Enter the debate topic/task: ").strip()
     if not task:
         task = "Should schools ban smartphones in classrooms?"
-    thread = {
+    if LANGSMITH_TRACING_ENABLED:
+        print(
+            f"LangSmith tracing: ON (project={os.getenv('LANGSMITH_PROJECT')}). "
+            "View traces at https://smith.langchain.com/"
+        )
+    else:
+        print(
+            "LangSmith tracing: OFF. Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY "
+            "to capture traces."
+        )
+    run_config = {
         "configurable": {
             "thread_id": "1"
-        }
+        },
+        "metadata": {"model": model_name, "langsmith_tracing": LANGSMITH_TRACING_ENABLED},
+        "tags": ["langsmith:nostream"],
     }
-    result = graph.invoke({"content": task}, config=thread)
+    result = graph.invoke({"content": task}, config=run_config)
     print(result["final_answer"])

@@ -36,6 +36,7 @@ This project expects:
 - Python `3.13+`
 - an `OPENROUTER_API_KEY`
 - a `TAVILY_API_KEY` or `TAVILY_SEARCH_KEY`
+- optional LangSmith tracing settings (`LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and optionally `LANGSMITH_PROJECT`)
 - `uv` for dependency management
 
 Use this from the repo root:
@@ -48,6 +49,9 @@ uv sync
 cat > .env <<'EOF'
 OPENROUTER_API_KEY=your_openrouter_key_here
 TAVILY_API_KEY=your_tavily_key_here
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your_langsmith_key_here
+LANGSMITH_PROJECT=consensusgraph
 EOF
 ```
 
@@ -71,3 +75,4 @@ If you press Enter without typing anything, the app uses that question as the de
 - The model is currently hard-coded in `app.py` as `moonshotai/kimi-k2.6`.
 - The Tavily key is required at startup; the app raises an error if it is missing.
 - State is only kept in memory for the current run.
+- LangSmith tracing is opt-in and enabled when `LANGSMITH_TRACING=true`.
