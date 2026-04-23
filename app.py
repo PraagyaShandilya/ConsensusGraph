@@ -4,11 +4,11 @@ import os
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openrouter import ChatOpenRouter
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
-
+import sqlite3
 from prompts import CON_PROMPT, FINAL_PROMPT, FOR_PROMPT, SYS_PROMPT
 
 load_dotenv()
@@ -17,7 +17,7 @@ load_dotenv()
 def _is_truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
-
+#clean this function the os environ vars should be set from the .env file in the local folder,confirm if load_dotenv invokes that
 def configure_langsmith_tracing() -> bool:
     """
     Enable LangSmith tracing when LANGSMITH_TRACING is truthy.
@@ -47,7 +47,10 @@ def configure_langsmith_tracing() -> bool:
 
 LANGSMITH_TRACING_ENABLED = configure_langsmith_tracing()
 
-memory = InMemorySaver()
+#replace with sqlite connection
+conn = sqlite3.connect('consensusgraph.db', check_same_thread=False)
+memory = SqliteSaver(conn)
+#separate this concern
 model_name = "moonshotai/kimi-k2.6"
 model = ChatOpenRouter(model=model_name, temperature=0.1, max_retries=1)
 TAVILY_KEY = os.getenv("TAVILY_API_KEY") or os.getenv("TAVILY_SEARCH_KEY")
@@ -68,6 +71,15 @@ class AgentState(TypedDict):
     con_argument: str
     final_answer: str
 
+def _run_tavily_search(topics: List[str], max_results: int = 2) -> List[str]:
+    results: List[str] = []
+    for topic in topics:
+        search_resp = tavily.search(query=topic, max_results=max_results)
+        for item in search_resp.get("results", []):
+            content = item.get("content")
+            if content:
+                results.append(content)
+    return results
 
 class Procon(BaseModel):
     """Planner output containing prompts + search directions."""
@@ -90,18 +102,6 @@ def planner_node(state: AgentState):
         "pro_search_topics": response.pro_search_topics,
         "con_search_topics": response.con_search_topics,
     }
-
-
-def _run_tavily_search(topics: List[str], max_results: int = 2) -> List[str]:
-    results: List[str] = []
-    for topic in topics:
-        search_resp = tavily.search(query=topic, max_results=max_results)
-        for item in search_resp.get("results", []):
-            content = item.get("content")
-            if content:
-                results.append(content)
-    return results
-
 
 def for_node(state: AgentState):
     results = _run_tavily_search(state.get("pro_search_topics", []))
@@ -159,6 +159,9 @@ graph_builder.add_edge("orchestrator", END)
 graph = graph_builder.compile(checkpointer=memory)
 
 
+
+
+#clean up the default prompt and make the invocation a lot more cleaner
 if __name__ == "__main__":
     task = input("Enter the debate topic/task: ").strip()
     if not task:
