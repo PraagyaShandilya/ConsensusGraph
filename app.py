@@ -69,17 +69,28 @@ class AgentState(TypedDict):
     con_search_topics: List[str]
     pro_argument: str
     con_argument: str
+    pro_citations: List[str]
+    con_citations: List[str]
     final_answer: str
+    citations: List[str]
 
-def _run_tavily_search(topics: List[str], max_results: int = 2) -> List[str]:
+def _run_tavily_search(topics: List[str], max_results: int = 2) -> tuple[List[str], List[str]]:
     results: List[str] = []
+    citations: List[str] = []
     for topic in topics:
         search_resp = tavily.search(query=topic, max_results=max_results)
         for item in search_resp.get("results", []):
             content = item.get("content")
+            url = item.get("url")
+            title = item.get("title") or "Untitled source"
             if content:
-                results.append(content)
-    return results
+                citation_index = len(citations) + 1
+                if url:
+                    citations.append(f"[{citation_index}] {title} - {url}")
+                else:
+                    citations.append(f"[{citation_index}] {title}")
+                results.append(f"[{citation_index}] {content}")
+    return results, citations
 
 class Procon(BaseModel):
     """Planner output containing prompts + search directions."""
@@ -104,7 +115,7 @@ def planner_node(state: AgentState):
     }
 
 def for_node(state: AgentState):
-    results = _run_tavily_search(state.get("pro_search_topics", []))
+    results, citations = _run_tavily_search(state.get("pro_search_topics", []))
     messages = [
         SystemMessage(
             content=FOR_PROMPT.format(
@@ -113,11 +124,11 @@ def for_node(state: AgentState):
         )
     ]
     response = model.invoke(messages)
-    return {"pro_argument": response.content}
+    return {"pro_argument": response.content, "pro_citations": citations}
 
 
 def con_node(state: AgentState):
-    results = _run_tavily_search(state.get("con_search_topics", []))
+    results, citations = _run_tavily_search(state.get("con_search_topics", []))
     messages = [
         SystemMessage(
             content=CON_PROMPT.format(
@@ -126,21 +137,28 @@ def con_node(state: AgentState):
         )
     ]
     response = model.invoke(messages)
-    return {"con_argument": response.content}
+    return {"con_argument": response.content, "con_citations": citations}
 
 
 def orchestrator_node(state: AgentState):
+    combined_citations = []
+    seen = set()
+    for citation in state.get("pro_citations", []) + state.get("con_citations", []):
+        if citation not in seen:
+            seen.add(citation)
+            combined_citations.append(citation)
     messages = [
         SystemMessage(
             content=FINAL_PROMPT.format(
                 task=state["content"],
                 pro_argument=state["pro_argument"],
                 con_argument=state["con_argument"],
+                citations="\n".join(combined_citations) if combined_citations else "No citations available.",
             )
         )
     ]
     response = model.invoke(messages)
-    return {"final_answer": response.content}
+    return {"final_answer": response.content, "citations": combined_citations}
 
 
 graph_builder = StateGraph(AgentState)
@@ -185,3 +203,7 @@ if __name__ == "__main__":
     }
     result = graph.invoke({"content": task}, config=run_config)
     print(result["final_answer"])
+    if result.get("citations"):
+        print("\nCitations:")
+        for citation in result["citations"]:
+            print(citation)
