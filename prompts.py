@@ -46,9 +46,14 @@ Task:
 Pro argument:
 {pro_argument}
 
+Pro rebuttal:
+{pro_rebuttal}
 
 Con argument:
 {con_argument}
+
+Con rebuttal:
+{con_rebuttal}
 
 Available citations:
 {citations}

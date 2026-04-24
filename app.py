@@ -1,15 +1,15 @@
+import asyncio
 from typing import List, TypedDict
 import os
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openrouter import ChatOpenRouter
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
-import sqlite3
-from prompts import CON_PROMPT, FINAL_PROMPT, FOR_PROMPT, SYS_PROMPT
+from prompts import CON_PROMPT, FINAL_PROMPT, FOR_PROMPT, REBUTTAL_PROMPT, SYS_PROMPT
 
 load_dotenv()
 
@@ -47,12 +47,13 @@ def configure_langsmith_tracing() -> bool:
 
 LANGSMITH_TRACING_ENABLED = configure_langsmith_tracing()
 
-#replace with sqlite connection
-conn = sqlite3.connect('consensusgraph.db', check_same_thread=False)
-memory = SqliteSaver(conn)
-#separate this concern
-model_name = "moonshotai/kimi-k2.6"
+try:
+        model_name = os.getenv("DEFAULT_MODEL_NAME")
+except:
+        model_name = "moonshotai/kimi-k2.6"
+
 model = ChatOpenRouter(model=model_name, temperature=0.1, max_retries=1)
+
 TAVILY_KEY = os.getenv("TAVILY_API_KEY") or os.getenv("TAVILY_SEARCH_KEY")
 if not TAVILY_KEY:
     raise RuntimeError(
@@ -69,6 +70,8 @@ class AgentState(TypedDict):
     con_search_topics: List[str]
     pro_argument: str
     con_argument: str
+    pro_rebuttal: str
+    con_rebuttal: str
     pro_citations: List[str]
     con_citations: List[str]
     final_answer: str
@@ -92,6 +95,10 @@ def _run_tavily_search(topics: List[str], max_results: int = 2) -> tuple[List[st
                 results.append(f"[{citation_index}] {content}")
     return results, citations
 
+
+async def _run_tavily_search_async(topics: List[str], max_results: int = 2) -> tuple[List[str], List[str]]:
+    return await asyncio.to_thread(_run_tavily_search, topics, max_results)
+
 class Procon(BaseModel):
     """Planner output containing prompts + search directions."""
 
@@ -101,12 +108,12 @@ class Procon(BaseModel):
     con_search_topics: List[str] = Field(description="search topics for the con argument")
 
 
-def planner_node(state: AgentState):
+async def planner_node(state: AgentState):
     messages = [
         SystemMessage(content=SYS_PROMPT),
         HumanMessage(content=state["content"]),
     ]
-    response = model.with_structured_output(Procon).invoke(messages)
+    response = await model.with_structured_output(Procon).ainvoke(messages)
     return {
         "pro": response.pro,
         "con": response.con,
@@ -114,8 +121,8 @@ def planner_node(state: AgentState):
         "con_search_topics": response.con_search_topics,
     }
 
-def for_node(state: AgentState):
-    results, citations = _run_tavily_search(state.get("pro_search_topics", []))
+async def for_node(state: AgentState):
+    results, citations = await _run_tavily_search_async(state.get("pro_search_topics", []))
     messages = [
         SystemMessage(
             content=FOR_PROMPT.format(
@@ -123,12 +130,12 @@ def for_node(state: AgentState):
             )
         )
     ]
-    response = model.invoke(messages)
+    response = await model.ainvoke(messages)
     return {"pro_argument": response.content, "pro_citations": citations}
 
 
-def con_node(state: AgentState):
-    results, citations = _run_tavily_search(state.get("con_search_topics", []))
+async def con_node(state: AgentState):
+    results, citations = await _run_tavily_search_async(state.get("con_search_topics", []))
     messages = [
         SystemMessage(
             content=CON_PROMPT.format(
@@ -136,11 +143,41 @@ def con_node(state: AgentState):
             )
         )
     ]
-    response = model.invoke(messages)
+    response = await model.ainvoke(messages)
     return {"con_argument": response.content, "con_citations": citations}
 
 
-def orchestrator_node(state: AgentState):
+async def pro_rebuttal_node(state: AgentState):
+    messages = [
+        SystemMessage(
+            content=REBUTTAL_PROMPT.format(
+                side="pro",
+                task=state["content"],
+                own_argument=state["pro_argument"],
+                opposing_argument=state["con_argument"],
+            )
+        )
+    ]
+    response = await model.ainvoke(messages)
+    return {"pro_rebuttal": response.content}
+
+
+async def con_rebuttal_node(state: AgentState):
+    messages = [
+        SystemMessage(
+            content=REBUTTAL_PROMPT.format(
+                side="con",
+                task=state["content"],
+                own_argument=state["con_argument"],
+                opposing_argument=state["pro_argument"],
+            )
+        )
+    ]
+    response = await model.ainvoke(messages)
+    return {"con_rebuttal": response.content}
+
+
+async def orchestrator_node(state: AgentState):
     combined_citations = []
     seen = set()
     for citation in state.get("pro_citations", []) + state.get("con_citations", []):
@@ -153,11 +190,13 @@ def orchestrator_node(state: AgentState):
                 task=state["content"],
                 pro_argument=state["pro_argument"],
                 con_argument=state["con_argument"],
+                pro_rebuttal=state["pro_rebuttal"],
+                con_rebuttal=state["con_rebuttal"],
                 citations="\n".join(combined_citations) if combined_citations else "No citations available.",
             )
         )
     ]
-    response = model.invoke(messages)
+    response = await model.ainvoke(messages)
     return {"final_answer": response.content, "citations": combined_citations}
 
 
@@ -165,22 +204,22 @@ graph_builder = StateGraph(AgentState)
 graph_builder.add_node("planner", planner_node)
 graph_builder.add_node("for_node", for_node)
 graph_builder.add_node("con_node", con_node)
+graph_builder.add_node("pro_rebuttal_node", pro_rebuttal_node)
+graph_builder.add_node("con_rebuttal_node", con_rebuttal_node)
 graph_builder.add_node("orchestrator", orchestrator_node)
 
 graph_builder.set_entry_point("planner")
 graph_builder.add_edge("planner", "for_node")
 graph_builder.add_edge("planner", "con_node")
-graph_builder.add_edge("for_node", "orchestrator")
-graph_builder.add_edge("con_node", "orchestrator")
+graph_builder.add_edge("for_node", "pro_rebuttal_node")
+graph_builder.add_edge("for_node", "con_rebuttal_node")
+graph_builder.add_edge("con_node", "pro_rebuttal_node")
+graph_builder.add_edge("con_node", "con_rebuttal_node")
+graph_builder.add_edge("pro_rebuttal_node", "orchestrator")
+graph_builder.add_edge("con_rebuttal_node", "orchestrator")
 graph_builder.add_edge("orchestrator", END)
 
-graph = graph_builder.compile(checkpointer=memory)
-
-
-
-
-#clean up the default prompt and make the invocation a lot more cleaner
-if __name__ == "__main__":
+async def main() -> None:
     task = input("Enter the debate topic/task: ").strip()
     if not task:
         task = "Should schools ban smartphones in classrooms?"
@@ -201,9 +240,17 @@ if __name__ == "__main__":
         "metadata": {"model": model_name, "langsmith_tracing": LANGSMITH_TRACING_ENABLED},
         "tags": ["langsmith:nostream"],
     }
-    result = graph.invoke({"content": task}, config=run_config)
-    print(result["final_answer"])
-    if result.get("citations"):
-        print("\nCitations:")
-        for citation in result["citations"]:
-            print(citation)
+    async with AsyncSqliteSaver.from_conn_string("consensusgraph.db") as memory:
+        graph = graph_builder.compile(checkpointer=memory)
+        result = await graph.ainvoke({"content": task}, config=run_config)
+        print(result["final_answer"])
+        if result.get("citations"):
+            print("\nCitations:")
+            for citation in result["citations"]:
+                print(citation)
+
+
+
+#clean up the default prompt and make the invocation a lot more cleaner
+if __name__ == "__main__":
+    asyncio.run(main())
